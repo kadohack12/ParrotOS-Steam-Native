@@ -63,6 +63,10 @@ fi
 # 6. Compatibility shims.
 ck "libudev.so.0 shim" "yes" "$([ -e "$LIB32/libudev.so.0" ] && echo yes || echo no)"
 
+# 7. System loader path needed by Steam's child processes.
+sysld="$(readlink -f /usr/lib/ld-linux.so.2 2>/dev/null || true)"
+ck "system loader path linked" "$LOADER" "$sysld"
+
 echo
 printf '== %d passed, %d failed ==\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
