@@ -1,0 +1,6 @@
+.build/
+*.deb
+stage/
+lib32/
+lib64/
+loader/
