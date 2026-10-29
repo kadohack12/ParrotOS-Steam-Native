@@ -51,10 +51,46 @@ host (pure amd64)                    runtime (/opt/parrot-steam)
 sudo ./parrot-steam-native.sh install     # download + extract + assemble runtime
 sudo ./parrot-steam-native.sh doctor      # host readiness + runtime state (read-only)
 sudo ./parrot-steam-native.sh run         # launch Steam through the runtime
+sudo ./parrot-steam-native.sh smoke       # headless validation under Xvfb
      ./parrot-steam-native.sh status      # show runtime contents
 sudo ./parrot-steam-native.sh clean       # drop the build cache (keep the runtime)
 sudo ./parrot-steam-native.sh uninstall   # remove everything
 ```
+
+### Headless smoke test
+
+`smoke` starts a throwaway Xvfb display and proves the runtime works before a
+real launch:
+
+1. a real i386 binary executes under the display;
+2. the 32-bit GL stack loads (NVIDIA vendor lib or Mesa);
+3. optionally, Steam's own bootstrap runs end to end.
+
+```bash
+sudo PARROT_STEAM_SMOKE_STEAM=1 PARROT_STEAM_SMOKE_TIMEOUT=180 \
+  ./parrot-steam-native.sh smoke
+```
+
+Proven on Debian 13 / amd64: the smoke test **downloads the 19 MB Steam
+bootstrap, runs `steam.sh`, and the real 32-bit client proceeds to download the
+full client** — with the host `dpkg` still reporting **0** i386 packages.
+
+### The `/lib/ld-linux.so.2` link
+
+Steam's 32-bit client is built with `PT_INTERP=/lib/ld-linux.so.2`, and its
+child processes (updater, helper UIs) are `exec`'d through that path. On a pure
+amd64 host that path does not exist, so the children fail with
+`cannot open shared object file`. `install` therefore creates **one tracked,
+reversible symlink**:
+
+```
+/usr/lib/ld-linux.so.2 -> /opt/parrot-steam/loader/ld-linux.so.2
+```
+
+It is recorded in `.system-loader-link`, removed by `uninstall`, and never
+overwrites an existing foreign file. Opt out with
+`PARROT_STEAM_NO_SYSTEM_LINK=1`.
+
 
 ### Configuration (environment)
 
@@ -65,6 +101,10 @@ sudo ./parrot-steam-native.sh uninstall   # remove everything
 | `PARROT_STEAM_MIRROR` | `http://deb.debian.org/debian` | main mirror |
 | `PARROT_STEAM_SECURITY` | `http://deb.debian.org/debian-security` | security mirror |
 | `PARROT_STEAM_BIN` | auto-detected | explicit path to the Steam binary |
+| `PARROT_STEAM_SMOKE_STEAM` | `0` | `1` = also run Steam's bootstrap in `smoke` |
+| `PARROT_STEAM_SMOKE_TIMEOUT` | `120` | max seconds for the Steam bootstrap |
+| `PARROT_STEAM_NO_SYSTEM_LINK` | `0` | `1` = do not create `/usr/lib/ld-linux.so.2` |
+| `PARROT_NVIDIA_PROC` | `/proc/driver/nvidia/version` | NVIDIA module version source |
 
 ## Why pin the runtime to its own suite
 
@@ -126,21 +166,37 @@ sudo ./tests/test-nvidia.sh    # simulated driver — runs with no GPU present
 ## Verification
 
 ```bash
-sudo ./tests/test-runtime.sh
+sudo ./tests/test-runtime.sh   # runtime: 11 checks
+sudo ./tests/test-nvidia.sh    # NVIDIA mapping, simulated driver: 8 checks
 ```
 
-Checks that the runtime resolves 32-bit dependencies with **zero** missing
-libraries and actually **executes** a real i386 binary — while the host `dpkg`
-still reports **0** i386 packages.
+The runtime suite checks that the runtime resolves 32-bit dependencies with
+**zero** missing libraries, actually **executes** a real i386 binary, and that
+the system loader path is linked — while the host `dpkg` still reports **0**
+i386 packages.
 
 ## Status
 
-Core mechanism proven on Debian 13 / amd64:
+Core mechanism proven end to end on Debian 13 / amd64:
 
 - 348 `.deb` fetched (195 i386) via isolated apt — host `dpkg` untouched.
 - 416 `lib32` objects + 448 `lib64` objects assembled.
 - 32-bit loader executes; `libgtk-3.so.0` resolves **63/63** dependencies.
 - Real i386 binaries (`gio-querymodules`, `gdk-pixbuf-query-loaders`) run.
+- **Steam itself runs**: the smoke test downloads the 19 MB bootstrap, launches
+  `steam.sh`, and the real 32-bit client (`ubuntu12_32/steam`) proceeds to
+  download the full client through the portable runtime.
+
+Test suites: `test-runtime.sh` **11/11**, `test-nvidia.sh` **8/8**.
+
+### Known limitations
+
+- Validated on a headless server with a software GL stack. On a real machine,
+  the NVIDIA path maps the vendor libraries (see above); Intel/AMD use the
+  distribution Mesa libs already present in `lib32`.
+- Steam's first launch downloads ~2.5 GB of client data — this is Steam's own
+  bootstrap, independent of this project.
+
 
 ## License
 

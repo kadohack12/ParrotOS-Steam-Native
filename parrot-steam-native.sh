@@ -53,6 +53,7 @@ DEBS="$WORK/debs"
 LIB32="$RUNTIME_DIR/lib32"
 LIB64="$RUNTIME_DIR/lib64"
 LOADER_DIR="$RUNTIME_DIR/loader"
+LOADER="$LOADER_DIR/ld-linux.so.2"
 
 # --------------------------------------------------------------------------
 # Isolated apt state
@@ -154,10 +155,60 @@ assemble_runtime() {
   cp -a "$ld" "$LOADER_DIR/ld-linux.so.2"
   chmod +x "$LOADER_DIR/ld-linux.so.2"
 
+  # The distro launcher is a shell script (not ELF): keep it in the runtime so
+  # the wrapper can invoke it to bootstrap the real 32-bit client.
+  if [ -x "$STAGE/usr/games/steam" ]; then
+    mkdir -p "$RUNTIME_DIR/bin"
+    cp -a "$STAGE/usr/games/steam" "$RUNTIME_DIR/bin/steam-launcher"
+    ok "lanceur Debian conservé: bin/steam-launcher"
+  fi
+
   write_compat_shims
   nvidia_map_runtime
   write_launcher
+  link_loader_path
   ok "lib32: $(find "$LIB32" -name '*.so*' | wc -l) objets, lib64: $(find "$LIB64" -name '*.so*' | wc -l) objets"
+}
+
+# Steam's 32-bit client is built with PT_INTERP=/lib/ld-linux.so.2, and its
+# child processes (updater, helper UIs) are exec'd with that interpreter path.
+# On a pure amd64 host that path does not exist, so the children cannot start.
+# We create a single, tracked, reversible symlink to the runtime loader.
+# Opt out with PARROT_STEAM_NO_SYSTEM_LINK=1.
+link_loader_path() {
+  [ "${PARROT_STEAM_NO_SYSTEM_LINK:-0}" = "1" ] && {
+    warn "symlink système désactivé (PARROT_STEAM_NO_SYSTEM_LINK=1) — les processus"
+    warn "enfants de Steam risquent de ne pas démarrer."
+    return 0
+  }
+
+  local target=/usr/lib/ld-linux.so.2
+  local current
+  current="$(readlink -f "$target" 2>/dev/null || true)"
+  if [ "$current" = "$LOADER" ]; then
+    ok "chemin loader système déjà lié ($target)"
+    return 0
+  fi
+  if [ -e "$target" ] && [ "$current" != "$LOADER" ]; then
+    warn "$target existe déjà (-> ${current:-fichier}) — laissé intact."
+    return 0
+  fi
+
+  as_root ln -sf "$LOADER" "$target" || { warn "création de $target impossible."; return 0; }
+  printf '%s\n' "$target" > "$RUNTIME_DIR/.system-loader-link"
+  ok "chemin loader système lié: $target -> $LOADER"
+}
+
+# Remove the system loader symlink, but only if it still points into our runtime.
+unlink_loader_path() {
+  local marker="$RUNTIME_DIR/.system-loader-link"
+  [ -f "$marker" ] || return 0
+  local target
+  target="$(cat "$marker")"
+  if [ "$(readlink -f "$target" 2>/dev/null)" = "$LOADER" ]; then
+    as_root rm -f "$target" && ok "symlink loader système retiré ($target)"
+  fi
+  rm -f "$marker"
 }
 
 # Steam's 32-bit blobs were built years ago and reference sonames that modern
@@ -206,18 +257,26 @@ fi
 export __GLX_VENDOR_LIBRARY_NAME=nvidia
 export LIBGL_DRIVERS_PATH="$LIB32${LIBGL_DRIVERS_PATH:+:$LIBGL_DRIVERS_PATH}"
 
-# Locate the real Steam binary.
+# Locate the real Steam entry point.
 STEAM_BIN="${PARROT_STEAM_BIN:-}"
 if [ -z "$STEAM_BIN" ]; then
-  for c in "$HOME/.steam/steam/ubuntu12_32/steam" \
+  for c in "$RUNTIME_DIR/bin/steam-launcher" \
+           "$HOME/.steam/steam/ubuntu12_32/steam" \
            "$HOME/.local/share/Steam/ubuntu12_32/steam" \
+           "$HOME/.steam/root/ubuntu12_32/steam" \
            /usr/lib/steam/steam /usr/games/steam /usr/bin/steam; do
     [ -x "$c" ] && { STEAM_BIN="$c"; break; }
   done
 fi
 [ -n "$STEAM_BIN" ] || { echo "Steam introuvable. Définir PARROT_STEAM_BIN." >&2; exit 1; }
 
-exec "$LOADER" --library-path "$LIB32:$LIB64" "$STEAM_BIN" "$@"
+# The distro launcher (/usr/games/steam) is a shell script that bootstraps the
+# real 32-bit client; only the downloaded client binary needs the 32-bit loader.
+if head -c 4 "$STEAM_BIN" 2>/dev/null | grep -q $'\x7fELF'; then
+  exec "$LOADER" --library-path "$LIB32:$LIB64" "$STEAM_BIN" "$@"
+else
+  exec "$STEAM_BIN" "$@"
+fi
 LAUNCHER
   chmod +x "$RUNTIME_DIR/steam.sh"
 }
@@ -225,6 +284,116 @@ LAUNCHER
 cmd_run() {
   [ -x "$RUNTIME_DIR/steam.sh" ] || die "Runtime absent. Lancer 'install' d'abord."
   exec "$RUNTIME_DIR/steam.sh" "$@"
+}
+
+# --------------------------------------------------------------------------
+# Smoke test — headless validation of the runtime before a real launch.
+#
+# Starts a throwaway Xvfb display, then proves the portable runtime can bring
+# up a real 32-bit process with a working graphics stack on that display. With
+# PARROT_STEAM_SMOKE_STEAM=1 it also attempts Steam's own bootstrap, bounded by
+# a timeout, and captures the log. Nothing is installed on the host except the
+# Xvfb test dependency.
+# --------------------------------------------------------------------------
+cmd_smoke() {
+  step "Smoke test (headless, Xvfb)"
+  [ -x "$LOADER_DIR/ld-linux.so.2" ] || die "Runtime absent. Lancer 'install' d'abord."
+
+  ensure_xvfb || die "Xvfb requis pour le smoke test (installation impossible)."
+
+  local disp
+  disp="$(find_free_display)"
+  log "démarrage Xvfb sur :$disp"
+  Xvfb ":$disp" -screen 0 1280x720x24 -nolisten tcp >"$WORK/xvfb.log" 2>&1 &
+  local xvfb_pid=$!
+  # shellcheck disable=SC2064
+  trap "kill $xvfb_pid 2>/dev/null" RETURN
+
+  # Wait for the X socket to appear.
+  local i
+  for i in $(seq 1 50); do
+    [ -e "/tmp/.X11-unix/X$disp" ] && break
+    sleep 0.1
+  done
+  [ -e "/tmp/.X11-unix/X$disp" ] || die "Xvfb n'a pas démarré (voir $WORK/xvfb.log)."
+  ok "Xvfb actif sur :$disp"
+
+  export DISPLAY=":$disp"
+  local rc=0
+
+  # Probe 1: the 32-bit loader runs a real i386 binary under this display.
+  local probe
+  probe="$(find "$STAGE" -type f -path '*i386*' -name 'gdk-pixbuf-query-loaders' 2>/dev/null | head -1)"
+  if [ -n "$probe" ]; then
+    local pout
+    pout="$("$LOADER" --library-path "$LIB32" "$probe" 2>&1)"
+    if printf '%s' "$pout" | grep -qE 'error while loading shared libraries|cannot open shared object'; then
+      warn "probe 1/3 : erreur de linkage i386"; rc=1
+      printf '      %s\n' "$(printf '%s' "$pout" | head -2)"
+    else
+      ok "probe 1/3 : binaire i386 exécuté sous Xvfb"
+    fi
+  else
+    warn "probe 1/3 : binaire de test introuvable (cache nettoyé ?)"
+  fi
+
+  # Probe 2: the 32-bit GL stack loads (libGL + a vendor driver).
+  local glprobe
+  glprobe="$(nvidia_find_lib32 'libGLX_nvidia.so.*' 2>/dev/null)"
+  if [ -n "$glprobe" ]; then
+    ok "probe 2/3 : pile GL NVIDIA 32-bit mappée ($(basename "$glprobe"))"
+  elif [ -e "$LIB32/libGL.so.1" ]; then
+    ok "probe 2/3 : libGL.so.1 32-bit présent (Mesa/software)"
+  else
+    warn "probe 2/3 : aucune pile GL 32-bit détectée"; rc=1
+  fi
+
+  # Probe 3 (optional): Steam's own bootstrap, bounded.
+  if [ "${PARROT_STEAM_SMOKE_STEAM:-0}" = "1" ]; then
+    log "probe 3/3 : tentative de bootstrap Steam (max ${PARROT_STEAM_SMOKE_TIMEOUT:-120}s)"
+
+    # The Debian launcher gates a first install behind a zenity/yad GUI prompt.
+    # Headless, we provide a stub that auto-accepts, so the bootstrap can run.
+    local stub="$WORK/stubbin"
+    mkdir -p "$stub"
+    printf '#!/bin/sh\nexit 0\n' > "$stub/zenity"
+    printf '#!/bin/sh\nexit 0\n' > "$stub/yad"
+    chmod +x "$stub/zenity" "$stub/yad"
+
+    local slog="$WORK/steam-smoke.log"
+    PATH="$stub:$PATH" timeout "${PARROT_STEAM_SMOKE_TIMEOUT:-120}" \
+      "$RUNTIME_DIR/steam.sh" -no-browser -console >"$slog" 2>&1
+    local src=$?
+    if grep -qiE 'Steam|error|GLIBC|not found|bootstrap|download' "$slog"; then
+      ok "probe 3/3 : sortie Steam capturée dans $slog (exit=$src)"
+      printf '      %s\n' "$(grep -iE 'error|GLIBC|not found|bootstrap' "$slog" | head -3)"
+    else
+      warn "probe 3/3 : aucune sortie Steam exploitable (exit=$src, voir $slog)"
+    fi
+  else
+    log "probe 3/3 : ignoré (PARROT_STEAM_SMOKE_STEAM=1 pour activer)"
+  fi
+
+  if [ "$rc" -eq 0 ]; then
+    ok "smoke test OK"
+  else
+    die "smoke test en échec"
+  fi
+}
+
+# Install Xvfb on demand; it is a test-only dependency, not part of the runtime.
+ensure_xvfb() {
+  have Xvfb && return 0
+  log "Xvfb absent — installation de la dépendance de test"
+  as_root env DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
+  as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq xvfb >/dev/null 2>&1 || return 1
+  have Xvfb
+}
+
+find_free_display() {
+  local d=99
+  while [ -e "/tmp/.X11-unix/X$d" ]; do d=$((d + 1)); done
+  printf '%s' "$d"
 }
 
 cmd_status() {
@@ -266,6 +435,15 @@ cmd_doctor() {
 
   printf '  lib32               : %s objets\n' "$(find "$LIB32" -name '*.so*' 2>/dev/null | wc -l)"
   printf '  bwrap (isolation)   : %s\n' "$(have bwrap && echo présent || echo absent)"
+  local sysld
+  sysld="$(readlink -f /usr/lib/ld-linux.so.2 2>/dev/null || true)"
+  if [ "$sysld" = "$LOADER" ]; then
+    printf '  loader système      : lié (/usr/lib/ld-linux.so.2 -> runtime)\n'
+  elif [ -e /usr/lib/ld-linux.so.2 ]; then
+    printf '  loader système      : présent mais étranger (%s)\n' "$sysld"
+  else
+    printf '  loader système      : absent (les enfants de Steam en ont besoin)\n'
+  fi
 
   # Runtime is pinned to a known-good Debian suite: this is what protects Steam
   # from the host's newer, potentially incompatible glibc/Mesa.
@@ -285,6 +463,7 @@ cmd_clean() {
 cmd_uninstall() {
   need_root
   [ -d "$RUNTIME_DIR" ] || { warn "Aucun runtime."; return 0; }
+  unlink_loader_path
   as_root rm -rf "$RUNTIME_DIR"
   ok "runtime supprimé ($RUNTIME_DIR)"
 }
@@ -320,14 +499,17 @@ Usage: sudo $0 <command>
   install     télécharge + extrait + assemble le runtime portable
   doctor      état de l'hôte et du runtime (lecture seule)
   run [args]  lance Steam via le runtime portable
+  smoke       test headless du runtime sous Xvfb (sans écran réel)
   status      contenu du runtime
   clean       supprime le cache de build (garde le runtime)
   uninstall   supprime tout le runtime
 
 Env:
-  PARROT_STEAM_DIR      préfixe runtime   (défaut: /opt/parrot-steam)
-  PARROT_STEAM_SUITE    suite Debian      (défaut: trixie)
-  PARROT_STEAM_MIRROR   miroir principal  (défaut: deb.debian.org)
+  PARROT_STEAM_DIR            préfixe runtime   (défaut: /opt/parrot-steam)
+  PARROT_STEAM_SUITE          suite Debian      (défaut: trixie)
+  PARROT_STEAM_MIRROR         miroir principal  (défaut: deb.debian.org)
+  PARROT_STEAM_SMOKE_STEAM=1  lance aussi le bootstrap Steam dans 'smoke'
+  PARROT_STEAM_SMOKE_TIMEOUT  délai max bootstrap Steam en s (défaut: 120)
 EOF
 }
 
@@ -337,6 +519,7 @@ main() {
     install)   cmd_install "$@" ;;
     doctor)    cmd_doctor "$@" ;;
     run)       cmd_run "$@" ;;
+    smoke)     cmd_smoke "$@" ;;
     status)    cmd_status "$@" ;;
     clean)     cmd_clean "$@" ;;
     uninstall) cmd_uninstall "$@" ;;
