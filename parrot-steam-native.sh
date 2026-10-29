@@ -23,6 +23,8 @@ set -o pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/common.sh
 . "$SCRIPT_DIR/lib/common.sh"
+# shellcheck source=lib/nvidia.sh
+. "$SCRIPT_DIR/lib/nvidia.sh"
 
 # --------------------------------------------------------------------------
 # Configuration
@@ -153,6 +155,7 @@ assemble_runtime() {
   chmod +x "$LOADER_DIR/ld-linux.so.2"
 
   write_compat_shims
+  nvidia_map_runtime
   write_launcher
   ok "lib32: $(find "$LIB32" -name '*.so*' | wc -l) objets, lib64: $(find "$LIB64" -name '*.so*' | wc -l) objets"
 }
@@ -192,6 +195,16 @@ LIB32="$RUNTIME_DIR/lib32"
 LIB64="$RUNTIME_DIR/lib64"
 
 export LD_LIBRARY_PATH="$LIB32:$LIB64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+# Expose the 32-bit NVIDIA Vulkan ICD to the loader, if one was generated.
+if [ -f "$RUNTIME_DIR/vulkan/nvidia_icd.json" ]; then
+  export VK_ICD_FILENAMES="$RUNTIME_DIR/vulkan/nvidia_icd.json${VK_ICD_FILENAMES:+:$VK_ICD_FILENAMES}"
+  export VK_DRIVER_FILES="$VK_ICD_FILENAMES"
+fi
+
+# Make the 32-bit GLVND dispatch find the mapped vendor libraries.
+export __GLX_VENDOR_LIBRARY_NAME=nvidia
+export LIBGL_DRIVERS_PATH="$LIB32${LIBGL_DRIVERS_PATH:+:$LIBGL_DRIVERS_PATH}"
 
 # Locate the real Steam binary.
 STEAM_BIN="${PARROT_STEAM_BIN:-}"
@@ -259,6 +272,8 @@ cmd_doctor() {
   if [ -f "$RUNTIME_DIR/manifest.txt" ]; then
     printf '  suite épinglée      : %s\n' "$(grep -m1 '^# suite:' "$RUNTIME_DIR/manifest.txt" | cut -d' ' -f3)"
   fi
+
+  nvidia_report
 }
 
 cmd_clean() {
