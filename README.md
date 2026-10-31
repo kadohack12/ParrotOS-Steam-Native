@@ -23,6 +23,14 @@ E: Unable to correct problems, you have held broken packages.
 Package versions differ by a suffix (`+deb13u2` vs `+deb13u1`), `apt` refuses to
 move, and the whole system is left in a broken state. This is the wall.
 
+> **Nuance (Parrot OS 7.x):** Parrot 7 a réintroduit *quelques* dépendances 32 bits,
+> mais ses dépôts — `echo-security` en particulier — et ses miroirs n'hébergent pas
+> l'intégralité de la pile graphique `i386` (`libgl1:i386`, `libgl1-mesa-dri:i386`,
+> `mesa-vulkan-drivers:i386`). Sans ces bibliothèques, `steam-launcher` échoue à
+> l'installation ou se fait désinstaller au premier `apt --fix-broken install`.
+> Le mur n'est donc pas toujours « aucune dépendance 32 bits », mais souvent
+> « pile 32 bits **incomplète** ».
+
 ## How this project breaks it
 
 Three mechanisms, each verified end-to-end on Debian 13 (trixie) / amd64:
@@ -65,10 +73,35 @@ sudo /opt/parrot-steam/steam.sh
 > proposent la plupart des guides (et un `install.sh` plus simple circule sur
 > les forums). Elle fonctionne *parfois*, mais elle modifie le `dpkg` de l'hôte
 > et échoue dès que les versions amd64/i386 divergent d'un suffixe
-> (`+deb13u2` vs `+deb13u1`) — voir *The multiarch wall* ci-dessous. Ce projet
+> (`+deb13u2` vs `+deb13u1`) — voir *The multiarch wall* ci-dessus. Ce projet
 > prend la voie inverse : **l'architecture `i386` n'est jamais déclarée sur
 > l'hôte**. Toute la résolution 32 bits se fait dans un état `apt` isolé, ce qui
 > rend l'opération réversible et impossible à corrompre.
+
+### ↩️ Désinstallation / Retour à l'état initial
+
+Rien n'a été inscrit dans le `dpkg` de l'hôte : retirer le runtime suffit à
+revenir à l'état initial.
+
+```bash
+sudo ./uninstall.sh                        # == sudo ./parrot-steam-native.sh uninstall
+```
+
+Le script supprime le runtime portable et le seul lien système tracé
+(`/usr/lib/ld-linux.so.2`). La base `dpkg` et la configuration `apt` de l'hôte
+n'ont jamais été modifiées.
+
+### 🎮 Carte graphique dédiée (NVIDIA Optimus, optionnel)
+
+Sur un portable hybride Intel + NVIDIA avec pilotes propriétaires, forcez le
+rendu sur le GPU NVIDIA depuis Steam : *Clic droit sur le jeu → Propriétés →
+Options de lancement*.
+
+```bash
+prime-run %command%
+# ou selon votre gestionnaire offload :
+# __NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia %command%
+```
 
 ## Usage
 
