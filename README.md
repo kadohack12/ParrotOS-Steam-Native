@@ -45,6 +45,31 @@ host (pure amd64)                    runtime (/opt/parrot-steam)
         untouched                            self-contained
 ```
 
+## Installation rapide (une seule commande)
+
+```bash
+git clone https://github.com/kadohack12/ParrotOS-Steam-Native.git
+cd ParrotOS-Steam-Native
+sudo ./install.sh          # == sudo ./parrot-steam-native.sh install
+```
+
+`install.sh` est un simple point d'entrée : il relaie ses arguments au moteur
+`parrot-steam-native.sh` et, sans argument, lance l'action `install`. Une fois
+terminé, lancez Steam :
+
+```bash
+sudo /opt/parrot-steam/steam.sh
+```
+
+> **Pourquoi pas `dpkg --add-architecture i386` ?** C'est l'approche que
+> proposent la plupart des guides (et un `install.sh` plus simple circule sur
+> les forums). Elle fonctionne *parfois*, mais elle modifie le `dpkg` de l'hôte
+> et échoue dès que les versions amd64/i386 divergent d'un suffixe
+> (`+deb13u2` vs `+deb13u1`) — voir *The multiarch wall* ci-dessous. Ce projet
+> prend la voie inverse : **l'architecture `i386` n'est jamais déclarée sur
+> l'hôte**. Toute la résolution 32 bits se fait dans un état `apt` isolé, ce qui
+> rend l'opération réversible et impossible à corrompre.
+
 ## Usage
 
 ```bash
