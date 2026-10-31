@@ -30,7 +30,6 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # Configuration
 # --------------------------------------------------------------------------
 RUNTIME_DIR="${PARROT_STEAM_DIR:-/opt/parrot-steam}"
-DEB_ARCHIVE="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
 
 # Debian release the runtime is built from. Parrot 7 "Echo" is trixie-based;
 # the runtime is intentionally independent from the host's own release so the
@@ -42,9 +41,6 @@ DEB_COMPONENTS="main contrib non-free non-free-firmware"
 
 # Root packages whose dependency closure pulls the full 32-bit set.
 STEAM_PACKAGES=(steam-installer)
-
-# Parallel download jobs.
-DL_JOBS="${PARROT_STEAM_JOBS:-8}"
 
 WORK="$RUNTIME_DIR/.build"
 APT_ROOT="$WORK/apt"
@@ -310,8 +306,8 @@ cmd_smoke() {
   trap "kill $xvfb_pid 2>/dev/null" RETURN
 
   # Wait for the X socket to appear.
-  local i
-  for i in $(seq 1 50); do
+  local _i
+  for _i in $(seq 1 50); do
     [ -e "/tmp/.X11-unix/X$disp" ] && break
     sleep 0.1
   done
@@ -401,7 +397,7 @@ cmd_status() {
   log "Runtime: $RUNTIME_DIR"
   printf '  lib32 : %s objets (%s)\n' "$(find "$LIB32" -name '*.so*' 2>/dev/null | wc -l)" "$(human_size "$LIB32")"
   printf '  lib64 : %s objets (%s)\n' "$(find "$LIB64" -name '*.so*' 2>/dev/null | wc -l)" "$(human_size "$LIB64")"
-  printf '  loader: %s\n' "$(ls -l "$LOADER_DIR/ld-linux.so.2" 2>/dev/null | awk '{print $5" octets"}')"
+  printf '  loader: %s\n' "$(find "$LOADER_DIR" -maxdepth 1 -name 'ld-linux.so.2' -printf '%s octets\n' 2>/dev/null)"
   printf '  cache : %s\n' "$(find "$DEBS" -name '*.deb' 2>/dev/null | wc -l) .deb"
   [ -f "$RUNTIME_DIR/manifest.txt" ] && printf '  manifest: %s lignes\n' "$(wc -l < "$RUNTIME_DIR/manifest.txt")"
 }

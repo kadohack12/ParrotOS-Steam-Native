@@ -188,10 +188,10 @@ nvidia_fetch_i386() {
   fi
 
   local n=0
-  for d in $(find "$DEBS" -name 'nvidia-*.deb' -o -name 'libnvidia-*.deb' 2>/dev/null); do
+  while IFS= read -r d; do
     dpkg-deb -x "$d" "$dl/" 2>/dev/null || continue
     n=$((n + 1))
-  done
+  done < <(find "$DEBS" \( -name 'nvidia-*.deb' -o -name 'libnvidia-*.deb' \) 2>/dev/null)
 
   find "$dl" -type d -name 'i386-linux-gnu' -print0 2>/dev/null |
     while IFS= read -r -d '' d; do
@@ -211,14 +211,14 @@ nvidia_link_aliases() {
     [ -e "$f" ] || continue
     base="$(basename "$f")"
     alias="$(printf '%s\n' "$base" | sed -n 's/\(.*\.so\)\.[0-9].*/\1/p')"
-    [ -n "$alias" ] && [ ! -e "$LIB32/$alias" ] && ln -sf "$base" "$LIB32/$alias" 2>/dev/null || true
+    if [ -n "$alias" ] && [ ! -e "$LIB32/$alias" ]; then
+      ln -sf "$base" "$LIB32/$alias" 2>/dev/null || true
+    fi
   done
 }
 
 nvidia_write_vulkan_icd() {
   local kver="$1"
-  local icd
-  icd="$(nvidia_find_lib32 'libGLX_nvidia.so.*')"
   # Prefer the dedicated Vulkan ICD if present.
   local vk
   vk="$(nvidia_find_lib32 'libnvidia-vulkan-producer.so.*')"
