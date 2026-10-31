@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shell:
+    name: ShellCheck & tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verification syntaxique
+        run: |
+          set -e
+          bash -n parrot-steam-native.sh
+          find lib tests -name '*.sh' -print0 | xargs -0 -n1 bash -n
+      - name: ShellCheck
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck parrot-steam-native.sh lib/*.sh tests/*.sh
+      - name: Tests NVIDIA (simules)
+        run: bash tests/test-nvidia.sh
